@@ -40,10 +40,17 @@ const COHERE_API_KEY = "64LtQMyWCmRPCiQjKyqpWgzlqIU09tqhSeNgws9e"; // Hardcoded 
 function App() {
   const [inputText, setInputText] = useState('');
   const [attachments, setAttachments] = useState<Attachment[]>([]);
-  const [messages, setMessages] = useState<Message[]>([]);
   const [isProcessing, setIsProcessing] = useState(false);
   const [mode, setMode] = useState<'chat' | 'quiz' | 'summarizer' | 'code' | 'formal'>('chat');
   const [error, setError] = useState<string | null>(null);
+  // Store messages per mode
+  const [modeMessages, setModeMessages] = useState<{ [key in typeof mode]: Message[] }>({
+    chat: [],
+    quiz: [],
+    summarizer: [],
+    code: [],
+    formal: [],
+  });
 
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
@@ -53,7 +60,13 @@ function App() {
     if (messagesEndRef.current) {
       messagesEndRef.current.scrollIntoView({ behavior: 'smooth' });
     }
-  }, [messages]);
+  }, [modeMessages, mode]);
+
+  // Helper to get/set messages for current mode
+  const messages = modeMessages[mode];
+  const setMessagesForMode = (msgs: Message[]) => {
+    setModeMessages(prev => ({ ...prev, [mode]: msgs }));
+  };
 
   async function fetchCohereResponse(prompt: string) {
     const response = await fetch(COHERE_API_URL, {
@@ -86,7 +99,7 @@ function App() {
       timestamp: new Date(),
       attachments: [...attachments],
     };
-    setMessages(prev => [...prev, newMessage]);
+    setMessagesForMode([...messages, newMessage]);
     setInputText('');
     setAttachments([]);
     setIsProcessing(true);
@@ -99,10 +112,10 @@ function App() {
         content: botContent,
         timestamp: new Date(),
       };
-      setMessages(prev => [...prev, botResponse]);
+      setMessagesForMode([...messages, newMessage, botResponse]);
     } catch (err: any) {
       setError(err.message);
-      setMessages(prev => [...prev, {
+      setMessagesForMode([...messages, newMessage, {
         id: `${Date.now() + 2}`,
         type: 'assistant',
         content: `Error: ${err.message}`,
