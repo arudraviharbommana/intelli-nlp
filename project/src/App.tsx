@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { Send, Paperclip, User, Bot } from 'lucide-react';
+import { Send, Paperclip, User, Bot, Image, FileText, File } from 'lucide-react';
 
 interface Message {
   id: string;
@@ -19,13 +19,12 @@ interface Attachment {
 }
 
 function getFileIcon(type: string) {
-  switch (type) {
-    case 'image': return <Image className="w-4 h-4" />;
-    case 'pdf': return <FileText className="w-4 h-4" />;
-    case 'code': return <File className="w-4 h-4" />;
-    default: return <File className="w-4 h-4" />;
-  }
+  if (type.startsWith('image/')) return <Image className="w-4 h-4" />;
+  if (type === 'application/pdf') return <FileText className="w-4 h-4" />;
+  if (type.includes('code') || type.includes('javascript') || type.includes('typescript')) return <File className="w-4 h-4" />;
+  return <File className="w-4 h-4" />;
 }
+
 function formatFileSize(bytes: number): string {
   if (bytes === 0) return '0 Bytes';
   const k = 1024;
@@ -43,13 +42,28 @@ function App() {
   const [isProcessing, setIsProcessing] = useState(false);
   const [mode, setMode] = useState<'chat' | 'quiz' | 'summarizer' | 'code' | 'formal'>('chat');
   const [error, setError] = useState<string | null>(null);
+
   // Store messages per mode
-  const [modeMessages, setModeMessages] = useState<{ [key in typeof mode]: Message[] }>({
-    chat: [],
-    quiz: [],
-    summarizer: [],
-    code: [],
-    formal: [],
+  const [modeMessages, setModeMessages] = useState<{ [key in typeof mode]: Message[] }>(() => {
+    const saved = localStorage.getItem('modeMessages');
+    if (saved) {
+      const parsed = JSON.parse(saved);
+      // Convert timestamps back to Date objects
+      Object.keys(parsed).forEach(k => {
+        parsed[k] = parsed[k].map((msg: any) => ({
+          ...msg,
+          timestamp: new Date(msg.timestamp)
+        }));
+      });
+      return parsed;
+    }
+    return {
+      chat: [],
+      quiz: [],
+      summarizer: [],
+      code: [],
+      formal: [],
+    };
   });
 
   const fileInputRef = useRef<HTMLInputElement | null>(null);
@@ -62,13 +76,25 @@ function App() {
     }
   }, [modeMessages, mode]);
 
-  // Helper to get/set messages for current mode
+  useEffect(() => {
+    localStorage.setItem('modeMessages', JSON.stringify(modeMessages));
+  }, [modeMessages]);
+
   const messages = modeMessages[mode];
   const setMessagesForMode = (msgs: Message[]) => {
     setModeMessages(prev => ({ ...prev, [mode]: msgs }));
   };
 
-  async function fetchCohereResponse(prompt: string) {
+  async function fetchCohereResponse(prompt: string, history: Message[]) {
+    let fullPrompt = '';
+    if (mode === 'code') {
+      fullPrompt = `You are a code analysis assistant. Analyze the following code, check for errors, and provide feedback.\n\n${prompt}`;
+    } else {
+      const context = history
+        .map(msg => `${msg.type === 'user' ? 'User' : 'Assistant'}: ${msg.content}`)
+        .join('\n');
+      fullPrompt = context ? `${context}\nUser: ${prompt}` : prompt;
+    }
     const response = await fetch(COHERE_API_URL, {
       method: 'POST',
       headers: {
@@ -77,7 +103,7 @@ function App() {
       },
       body: JSON.stringify({
         model: 'command',
-        prompt,
+        prompt: fullPrompt,
         max_tokens: 300,
       }),
     });
@@ -87,6 +113,49 @@ function App() {
     }
     const data = await response.json();
     return data.generations?.[0]?.text || 'No response';
+  }
+
+  const modeWelcome: { [key in typeof mode]: { title: string, desc: string } } = {
+    chat: {
+      title: 'Welcome to Chat Mode',
+      desc: 'Ask anything or start a conversation. The agent will respond as a general assistant.'
+    },
+    quiz: {
+      title: 'Welcome to Quiz Generator',
+      desc: 'Provide content and the agent will generate quiz questions.'
+    },
+    summarizer: {
+      title: 'Welcome to Summarizer',
+      desc: 'Paste text and the agent will summarize it for you.'
+    },
+    code: {
+      title: 'Welcome to Code Analyzer',
+      desc: 'Paste code or ask for code analysis, debugging, or improvement.'
+    },
+    formal: {
+      title: 'Welcome to Formal Fellow',
+      desc: 'Paste text to transform style and tone professionally.'
+    },
+  };
+
+  function detectTaskType(prompt: string): 'chat' | 'quiz' | 'summarizer' | 'code' | 'formal' | null {
+    const p = prompt.toLowerCase();
+    // Detect code by keywords or code-like patterns
+    const codePatterns = [
+      /def\s+\w+\s*\(/, // Python function
+      /class\s+\w+/, // Class definition
+      /function\s+\w+\s*\(/, // JS function
+      /#include\s+<\w+>/, // C/C++ include
+      /import\s+\w+/, // Import statement
+      /\/\//, // JS/Java/C++ comment
+      /#/ // Python comment
+    ];
+    if (codePatterns.some(re => re.test(prompt)) || p.match(/\.py|\.js|\.ts|\.cpp|\.c|\.java|\.html|\.css|\.json|\.md/)) return 'code';
+    if (p.includes('quiz') || p.includes('question')) return 'quiz';
+    if (p.includes('summarize') || p.includes('summary')) return 'summarizer';
+    if (p.includes('formal') || p.includes('professional') || p.includes('rewrite')) return 'formal';
+    if (p.trim()) return 'chat';
+    return null;
   }
 
   const sendMessage = async () => {
@@ -104,8 +173,8 @@ function App() {
     setAttachments([]);
     setIsProcessing(true);
     try {
-      const prompt = `${mode.toUpperCase()} MODE: ${newMessage.content}`;
-      const botContent = await fetchCohereResponse(prompt);
+      // Always process in current mode, no interruptions or suggestions
+      const botContent = await fetchCohereResponse(newMessage.content, [...messages, newMessage]);
       const botResponse: Message = {
         id: `${Date.now() + 1}`,
         type: 'assistant',
@@ -128,7 +197,6 @@ function App() {
   const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
     const files = e.target.files;
     if (!files) return;
-
     const newAttachments: Attachment[] = Array.from(files).map(file => ({
       id: `${file.name}-${file.size}`,
       name: file.name,
@@ -136,7 +204,6 @@ function App() {
       size: file.size,
       url: URL.createObjectURL(file),
     }));
-
     setAttachments(prev => [...prev, ...newAttachments]);
   };
 
@@ -145,14 +212,23 @@ function App() {
   };
 
   const handleKeyPress = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
-    if (e.key === 'Enter' && e.shiftKey) {
-      // Allow new line
-      return;
-    }
+    if (e.key === 'Enter' && e.shiftKey) return;
     if (e.key === 'Enter') {
       e.preventDefault();
       sendMessage();
     }
+  };
+
+  const handleModeChange = (newMode: typeof mode) => {
+    setMode(prevMode => {
+      if (newMode === 'summarizer') {
+        setModeMessages(prev => ({
+          ...prev,
+          summarizer: []
+        }));
+      }
+      return newMode;
+    });
   };
 
   return (
@@ -169,16 +245,15 @@ function App() {
           <button
             key={tab.key}
             className={`px-4 py-2 rounded-lg font-semibold transition-colors ${mode === tab.key ? 'bg-blue-600 text-white' : 'bg-gray-100 text-gray-700 hover:bg-blue-100'}`}
-            onClick={() => setMode(tab.key as typeof mode)}
+            onClick={() => handleModeChange(tab.key as typeof mode)}
           >
             {tab.label}
           </button>
         ))}
       </div>
       <div className="pt-14 w-full flex h-screen bg-gray-50">
-        {/* Shared chat UI for all modes */}
+        {/* Chat UI */}
         <div className="flex-1 flex flex-col">
-          {/* Header */}
           <div className="bg-white border-b border-gray-200 p-4 flex items-center justify-between">
             <div className="flex-1 text-center">
               <h2 className="text-lg font-semibold text-gray-800">
@@ -189,17 +264,14 @@ function App() {
               </p>
             </div>
           </div>
-          {/* Messages */}
           <div className="flex-1 overflow-y-auto p-4 space-y-6">
             {messages.length === 0 ? (
               <div className="flex flex-col items-center justify-center h-full text-center">
-                <div className="w-16 h-16 bg-gradient-to-r from-blue-500 to-purple-600 rounded-2xl flex items-center justify-center mb-4">
+                <div className="w-16 h-16 bg-gradient-to-r from-blue-500 to-blue-300 rounded-2xl flex items-center justify-center mb-4">
                   <Bot className="w-8 h-8 text-white" />
                 </div>
-                <h3 className="text-2xl font-bold text-gray-800 mb-2">Welcome to IntelliNLP</h3>
-                <p className="text-gray-600 max-w-md">
-                  Type your request and get a generated response for any mode.
-                </p>
+                <h3 className="text-2xl font-bold text-gray-800 mb-2">{modeWelcome[mode].title}</h3>
+                <p className="text-gray-600 max-w-md mb-8">{modeWelcome[mode].desc}</p>
               </div>
             ) : (
               messages.map(message => (
@@ -210,39 +282,25 @@ function App() {
                     </div>
                   )}
                   <div className={`max-w-3xl ${message.type === 'user' ? 'order-1' : ''}`}>
-                    <div className={`p-4 rounded-2xl ${
-                      message.type === 'user' 
-                        ? 'bg-blue-600 text-white ml-auto' 
-                        : 'bg-white border border-gray-200 shadow-sm'
-                    }`}>
-                      {/* Attachments */}
+                    <div className={`p-4 rounded-2xl ${message.type === 'user' ? 'bg-blue-600 text-white ml-auto' : 'bg-white border border-gray-200 shadow-sm'}`}>
                       {message.attachments && message.attachments.length > 0 && (
                         <div className="mb-3 space-y-2">
                           {message.attachments.map(attachment => (
-                            <div key={attachment.id} className={`flex items-center gap-2 p-2 rounded-lg ${
-                              message.type === 'user' ? 'bg-blue-500' : 'bg-gray-50'
-                            }`}>
+                            <div key={attachment.id} className={`flex items-center gap-2 p-2 rounded-lg ${message.type === 'user' ? 'bg-blue-500' : 'bg-gray-50'}`}>
                               {getFileIcon(attachment.type)}
                               <div className="flex-1 min-w-0">
                                 <div className="text-sm font-medium truncate">{attachment.name}</div>
                                 <div className="text-xs opacity-75">{formatFileSize(attachment.size)}</div>
                               </div>
                               {attachment.type === 'image' && attachment.url && (
-                                <img 
-                                  src={attachment.url} 
-                                  alt={attachment.name}
-                                  className="w-12 h-12 object-cover rounded"
-                                />
+                                <img src={attachment.url} alt={attachment.name} className="w-12 h-12 object-cover rounded" />
                               )}
                             </div>
                           ))}
                         </div>
                       )}
-                      {/* Message Content */}
                       <div className="whitespace-pre-wrap">{message.content}</div>
-                      <div className={`text-xs mt-2 opacity-75 ${
-                        message.type === 'user' ? 'text-blue-100' : 'text-gray-500'
-                      }`}>
+                      <div className={`text-xs mt-2 opacity-75 ${message.type === 'user' ? 'text-blue-100' : 'text-gray-500'}`}>
                         {message.timestamp.toLocaleTimeString()}
                       </div>
                     </div>
@@ -277,9 +335,7 @@ function App() {
             )}
             <div ref={messagesEndRef} />
           </div>
-          {/* Input Area */}
           <div className="bg-white border-t border-gray-200 p-4">
-            {/* Attachments Preview */}
             {attachments.length > 0 && (
               <div className="mb-4 flex flex-wrap gap-2">
                 {attachments.map(attachment => (
@@ -318,8 +374,8 @@ function App() {
                   onChange={(e) => setInputText(e.target.value)}
                   onKeyPress={handleKeyPress}
                   placeholder={`Type your request for ${mode}... (Shift+Enter for new line)`}
-                  className="w-full p-3 border border-gray-300 rounded-xl focus:ring-2 focus:ring-blue-500 focus:border-transparent resize-none max-h-48"
-                  rows={1}
+                  className="w-full p-3 border border-gray-300 rounded-xl focus:ring-2 focus:ring-blue-500 focus:border-transparent resize-none min-h-[80px] max-h-64"
+                  rows={4}
                 />
               </div>
               <button
